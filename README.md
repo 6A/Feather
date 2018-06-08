@@ -48,3 +48,13 @@ lose all its references to [FSharp.Core](https://www.nuget.org/packages/FSharp.C
 The [Feather.Tests](./Feather.Tests) projects finally ensures that both these statements are true:
 - `Feather.TestAssembly.dll` does not contain **any** reference to `FSharp.Core`.
 - `Feather.TestAssembly.dll` can be loaded, and works flawlessly.
+
+## Contributing
+### Adding tests
+1. Add test cases to [Feather.TestAssembly](./Feather.TestAssembly).
+2. Make sure they work after removal of all F# references in [Feather.Tests](./Feather.Tests).
+
+### Adding replacements
+1. Grab [dnSpy](https://github.com/0xd4d/dnSpy) to analyze output assemblies.
+2. Find a common pattern or specific use.
+3. Implement a replacement in [ModuleWeaver.cs](./Feather.Fody/ModuleWeaver.cs).
