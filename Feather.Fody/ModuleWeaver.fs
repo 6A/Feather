@@ -87,7 +87,13 @@ type ModuleWeaver() as this =
             if this.PurgeType(typ) then
                 ty.NestedTypes.RemoveAt(i)
         
-        false
+        let remove = not (isNull ty.DeclaringType) && ty.DeclaringType.IsFSharp
+                  || ty.Interfaces.Any(fun x -> x.InterfaceType.IsFSharp)
+
+        if remove then
+            logDebug "Type %s inherits or implements an FSharp.Core type and will be removed." ty.FullName
+        
+        remove
     
     member this.PurgeField(field: FieldDefinition) =
         // 1. Clean attributes
@@ -125,31 +131,23 @@ type ModuleWeaver() as this =
     // ==== CLEANING METHODS ==============================================================
     // ====================================================================================
 
-    member this.GetReplacementType(typ: TypeReference) =
-        match typ.FullName with
-        | _ when not typ.IsFSharp -> typ
-        | _ -> logWarning "Unknown F# type %s." typ.FullName; typ
-
-    member this.ReplaceParameter(param: ParameterDefinition) =
+    member __.ReplaceParameter(param: ParameterDefinition) =
         if param.ParameterType.IsFSharp then
-            param.ParameterType <- this.GetReplacementType(param.ParameterType)
+            match param.ParameterType.FullName with
+            | "Microsoft.FSharp.Core.FSharpRef`1" ->
+                param.ParameterType <- param.ParameterType.GenericParameters.[0]
+                param.IsIn <- true
+            
+            | _  ->
+                match Replacements.getTypeReplacement(param.ParameterType) with
+                | null -> logWarning "Unable to find replacement type for %O." param.ParameterType
+                | repl -> param.ParameterType <- repl
 
-    member this.ReplaceVariable(var: VariableDefinition) =
+    member __.ReplaceVariable(var: VariableDefinition) =
         if var.VariableType.IsFSharp then
-            var.VariableType <- this.GetReplacementType(var.VariableType)
-
-    member this.ReplaceInstruction(instr: Instruction) =
-        match instr.Operand with
-        | :? TypeReference as typ when typ.IsFSharp ->
-            logWarning "Unknown type %s." typ.FullName
-
-        | :? FieldReference as field when field.IsFSharp ->
-            logWarning "Unknown field %s." field.FullName
-        
-        | :? MethodReference as method when method.IsFSharp ->
-            logWarning "Unknown method %s." method.FullName
-        
-        | _ -> ()
+            match Replacements.getTypeReplacement(var.VariableType) with
+            | null -> logWarning "Unable to find replacement type for %O." var.VariableType
+            | repl -> var.VariableType <- repl
 
     member this.PurgeMethod(method: MethodDefinition) =
         // 1. Clean attributes
@@ -158,9 +156,10 @@ type ModuleWeaver() as this =
                 method.CustomAttributes.RemoveAt(i)
 
         // 2. Replace parameter and return types
-        match this.GetReplacementType(method.ReturnType) with
-        | null -> ()
-        | typ -> method.ReturnType <- typ
+        if method.ReturnType.IsFSharp then
+            match Replacements.getTypeReplacement(method.ReturnType) with
+            | null -> logWarning "Unable to find replacement type for %O." method.ReturnType
+            | typ -> method.ReturnType <- typ
 
         for param in method.Parameters do
             this.ReplaceParameter(param)
@@ -170,7 +169,6 @@ type ModuleWeaver() as this =
             this.ReplaceVariable(var)
 
         // 4. Replace member references and function calls
-        for instr in method.Body.Instructions do
-            this.ReplaceInstruction(instr)
+        BodyWeaving.weave(this.LogDebug, this.LogWarning, this.LogError, method)
         
         false

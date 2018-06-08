@@ -1,4 +1,2 @@
-﻿type Record = { Foo : string }
-
-[<EntryPoint>]
+﻿[<EntryPoint>]
 let main argv = 0

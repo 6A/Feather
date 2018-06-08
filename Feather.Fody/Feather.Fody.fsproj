@@ -36,6 +36,8 @@
 
   <ItemGroup>
     <Compile Include="Helpers.fs" />
+    <Compile Include="Replacements.fs" />
+    <Compile Include="BodyWeaving.fs" />
     <Compile Include="ModuleWeaver.fs" />
   </ItemGroup>
 
