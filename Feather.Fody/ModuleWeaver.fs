@@ -1,10 +1,14 @@
 namespace Feather
 
+open System.Collections.Generic
 open System.Linq
 
 open Fody
 open Mono.Cecil
 open Mono.Cecil.Cil
+
+open BodyWeaving
+open TypeReplacing
 
 
 /// Weaver that will purge all FSharp.Core-related members from the visited module.
@@ -37,7 +41,7 @@ type ModuleWeaver() as this =
     // ==== CLEANING ======================================================================
     // ====================================================================================
 
-    override this.Execute() =
+    override __.Execute() =
         // 1. Find and remove reference to FSharp.Core
         this.ModuleDefinition.AssemblyReferences
                              .Remove(fun asm -> asm.Name = "FSharp.Core")
@@ -55,7 +59,7 @@ type ModuleWeaver() as this =
             if this.PurgeType(typ) then
                 this.ModuleDefinition.Types.RemoveAt(i)
 
-    member this.PurgeType(ty: TypeDefinition) =
+    member __.PurgeType(ty: TypeDefinition) =
         // 1. Clean attributes
         for i, attr in ty.CustomAttributes.GetMutableEnumerator() do
             if attr.AttributeType.IsFSharp then
@@ -95,7 +99,7 @@ type ModuleWeaver() as this =
         
         remove
     
-    member this.PurgeField(field: FieldDefinition) =
+    member __.PurgeField(field: FieldDefinition) =
         // 1. Clean attributes
         for i, attr in field.CustomAttributes.GetMutableEnumerator() do
             if attr.AttributeType.IsFSharp then
@@ -103,7 +107,7 @@ type ModuleWeaver() as this =
         
         false
 
-    member this.PurgeEvent(event: EventDefinition) =
+    member __.PurgeEvent(event: EventDefinition) =
         // 1. Clean attributes
         for i, attr in event.CustomAttributes.GetMutableEnumerator() do
             if attr.AttributeType.IsFSharp then
@@ -111,7 +115,7 @@ type ModuleWeaver() as this =
         
         false
 
-    member this.PurgeProperty(prop: PropertyDefinition) =
+    member __.PurgeProperty(prop: PropertyDefinition) =
         // 1. Clean attributes
         for i, attr in prop.CustomAttributes.GetMutableEnumerator() do
             if attr.AttributeType.IsFSharp then
@@ -139,17 +143,17 @@ type ModuleWeaver() as this =
                 param.IsIn <- true
             
             | _  ->
-                match Replacements.getTypeReplacement(param.ParameterType) with
+                match getTypeReplacement(param.ParameterType) with
                 | null -> logWarning "Unable to find replacement type for %O." param.ParameterType
                 | repl -> param.ParameterType <- repl
 
     member __.ReplaceVariable(var: VariableDefinition) =
         if var.VariableType.IsFSharp then
-            match Replacements.getTypeReplacement(var.VariableType) with
+            match getTypeReplacement(var.VariableType) with
             | null -> logWarning "Unable to find replacement type for %O." var.VariableType
             | repl -> var.VariableType <- repl
 
-    member this.PurgeMethod(method: MethodDefinition) =
+    member __.PurgeMethod(method: MethodDefinition) =
         // 1. Clean attributes
         for i, attr in method.CustomAttributes.GetMutableEnumerator() do
             if attr.AttributeType.IsFSharp then
@@ -157,7 +161,7 @@ type ModuleWeaver() as this =
 
         // 2. Replace parameter and return types
         if method.ReturnType.IsFSharp then
-            match Replacements.getTypeReplacement(method.ReturnType) with
+            match getTypeReplacement(method.ReturnType) with
             | null -> logWarning "Unable to find replacement type for %O." method.ReturnType
             | typ -> method.ReturnType <- typ
 
@@ -169,6 +173,115 @@ type ModuleWeaver() as this =
             this.ReplaceVariable(var)
 
         // 4. Replace member references and function calls
-        BodyWeaving.weave(this.LogDebug, this.LogWarning, this.LogError, method)
+        this.PurgeMethodBody(method)
         
         false
+    
+    member __.PurgeMethodBody(method: MethodDefinition) =
+        // Set up local variables
+        let body = method.Body
+        let instrs = body.Instructions
+
+        let inline instrsAtWithLen(start, len) =
+            [| for i = 0 to len do yield instrs.[start + i] |]
+        let inline lazyInstrsAtWithLen(start, len) =
+            lazy instrsAtWithLen(start, len)
+
+        // Recursively process calls
+        let mutable i = 0
+
+        // This stack keeps track of every element currently on the stack by saving their
+        // (valueStart, valueLength).
+        let stack = Stack()
+
+        while i < instrs.Count do
+            let instr = instrs.[i]
+            
+            let mutable groupStart = 0
+            let mutable args = [||]
+
+            match instr.StackChanges with
+            | 0, 0 -> ()
+            | 0, 1 -> stack.Push(i, 1)
+            
+            | 1, 1 -> let start, len = stack.Pop()
+                      stack.Push(start, len + 1)
+
+                      groupStart <- start
+                      args <- [| lazyInstrsAtWithLen(start, len) |]
+            
+            | 1, 2 -> let start, len = stack.Pop()
+                      stack.Push(start, len + 1)
+                      stack.Push(i, 1)
+
+                      groupStart <- start
+                      args <- [| lazyInstrsAtWithLen(start, len) ; lazyInstrsAtWithLen(i, 1) |]
+
+            | n, 1 -> let mutable start, len = stack.Pop()
+
+                      groupStart <- start
+
+                      args <- Array.zeroCreate n
+                      args.[0] <- lazyInstrsAtWithLen(start, len)
+
+                      for i in 1..n do
+                        let s, l = stack.Pop()
+
+                        args.[i] <- lazyInstrsAtWithLen(s, l)
+                        start    <- min start s
+                        len      <- len + l
+                      
+                      stack.Push(start, len)
+
+            | n, p -> logWarning "Unsupported stack operation (removed %d and added %d) in %O." n p method
+
+            match instr.Operand with
+            | :? TypeReference as typ when typ.IsFSharp ->
+                match instr.OpCode.Code with
+                | Code.Ldtoken ->
+                    // typeof<'T> -> null
+                    instr.OpCode  <- OpCodes.Ldnull
+                    instr.Operand <- null
+
+                    logWarning "Removing typeof<%s> in %s." typ.FullName method.FullName
+                
+                | Code.Newarr | Code.Newobj ->
+                    // new FSharpType[] -> new ReplacementType[]
+                    // new FSharpType() -> new ReplacementType()
+                    instr.Operand <- getTypeReplacement typ
+            
+                | _ ->
+                    logWarning "Unhandled type reference in %s (opcode: %O)." method.FullName instr.OpCode
+                
+                i <- i + 1
+
+            | :? FieldReference as fld when fld.DeclaringType.IsFSharp ->
+                // FSharpType.fieldAccess
+                let start, len, arg =
+                    match instr.OpCode.Code with
+                    | Code.Ldfld  -> groupStart, i - groupStart, Some(args.[0])
+                    | Code.Ldsfld -> i, 0, None
+
+                    | _ ->
+                        logWarning "Unhandled field reference in %s (opcode: %O)." method.FullName instr.OpCode
+                        0, 0, None
+
+                let toReplace   = instrsAtWithLen(start, len)
+                let replacement = replaceFieldAccess(fld, toReplace, arg, this.LogDebug, this.LogWarning, this.LogError)
+                let prevLen     = instrs.Count
+                
+                instrs.ReplaceRange(start, start + len, replacement)
+                
+                i <- i + 1 + instrs.Count - prevLen
+            
+            | :? MethodReference as method when method.DeclaringType.IsFSharp ->
+                // Call(a, b)
+                let toReplace   = instrsAtWithLen(groupStart, i - groupStart)
+                let replacement = replaceCall(method, toReplace, args, this.LogDebug, this.LogWarning, this.LogError)
+                let prevLen     = instrs.Count
+
+                instrs.ReplaceRange(groupStart, i, replacement)
+
+                i <- i + 1 + instrs.Count - prevLen
+
+            | _ -> i <- i + 1

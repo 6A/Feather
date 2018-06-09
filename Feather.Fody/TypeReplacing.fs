@@ -1,4 +1,4 @@
-module internal Replacements
+module internal TypeReplacing
 
 open Mono.Cecil
 
