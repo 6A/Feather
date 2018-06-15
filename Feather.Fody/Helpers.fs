@@ -1,19 +1,35 @@
 [<AutoOpen>]
 module internal Helpers
 
-open Mono.Cecil
-open Mono.Collections.Generic
-open Mono.Cecil.Cil
 open System.IO
+open System.Linq
+
+open Microsoft.FSharp.Quotations
+open Microsoft.FSharp.Quotations.Patterns
+
+open Mono.Cecil
+open Mono.Cecil.Cil
+open Mono.Collections.Generic
 
 type IMetadataScope with
     /// Returns whether this scope corresponds to FSharp.Core.
     member this.IsFSharp = this.Name = "FSharp.Core"
 
 type TypeReference with
-    /// Returns whether the declaring module of this member is FSharp.Core.
+    /// Returns whether the declaring module of this type is FSharp.Core.
     member this.IsFSharp =
         this.Scope.IsFSharp || (not (isNull this.DeclaringType) && this.DeclaringType.IsFSharp)
+    
+    /// Returns whether this type is `void`.
+    member this.IsVoid =
+        this.FullName = "System.Void"
+
+type TypeDefinition with
+    /// Returns the first method bearing the given name.
+    member this.GetMethod(s) = this.Methods.FirstOrDefault(fun x -> x.Name = s)
+
+    /// Returns the field bearing the given name.
+    member this.GetField(s) = this.Fields.FirstOrDefault(fun x -> x.Name = s)
 
 type MemberReference with
     /// Returns whether the declaring module of this member is FSharp.Core.
@@ -48,6 +64,19 @@ type Collection<'T> with
         for i, item in this.GetMutableEnumerator() do
             if condition item then
                 this.RemoveAt(i)
+
+type ModuleDefinition with
+    member inline this.MethodOf([<ReflectedDefinition>] m: Expr<_>) =
+        match m with Call(_, m, _) -> this.ImportReference m
+                   | _             -> null
+
+    member inline this.FieldOf([<ReflectedDefinition>] f: Expr<_>) =
+        match f with FieldSet(_, f, _) | FieldGet(_, f) -> this.ImportReference f
+                   | _                                  -> null
+    
+    member inline this.TypeOf<'T>() =
+        this.ImportReference typeof<'T>
+
 
 type StackBehaviour with
     /// Returns the number of items added to the stack by this operation.
@@ -84,14 +113,14 @@ type StackBehaviour with
         | _ -> -1
 
 let inline private returnSize(method : MethodReference) =
-    if method.ReturnType.Name = "Void" then 0 else 1
+    if method.ReturnType.IsVoid then 0 else 1
 
 let inline private instanceSize(method : MethodReference) =
     if method.HasThis then 1 else 0
 
 type Instruction with
     /// Returns the number of items added to the stack by this operation.
-    member this.StackChange =
+    member this.GetStackChange(returnsVoid: bool) =
         match this.OpCode.Code with
         | Code.Call | Code.Calli | Code.Callvirt ->
             match this.Operand with
@@ -99,11 +128,13 @@ type Instruction with
                 returnSize method - method.Parameters.Count - instanceSize method
             | _ ->
                 raise <| InvalidDataException()
+        
+        | Code.Ret -> if returnsVoid then 0 else -1
 
         | _ -> this.OpCode.StackBehaviourPop.StackChange + this.OpCode.StackBehaviourPush.StackChange
 
     /// Returns a (number of popped items, number of pushed items) pair.
-    member this.StackChanges =
+    member this.GetStackChanges(returnsVoid: bool) =
         match this.OpCode.Code with
         | Code.Call | Code.Calli | Code.Callvirt ->
             match this.Operand with
@@ -111,5 +142,7 @@ type Instruction with
                 method.Parameters.Count + instanceSize method, returnSize method
             | _ ->
                 raise <| InvalidDataException()
+        
+        | Code.Ret -> (if returnsVoid then 0 else 1), 0
 
-        | _ -> this.OpCode.StackBehaviourPop.StackChange, this.OpCode.StackBehaviourPush.StackChange
+        | _ -> -this.OpCode.StackBehaviourPop.StackChange, this.OpCode.StackBehaviourPush.StackChange

@@ -53,7 +53,7 @@ type ModuleWeaver() as this =
                              .Remove(fun attr -> attr.AttributeType.IsFSharp)
         this.ModuleDefinition.Assembly.CustomAttributes
                                       .Remove(fun attr -> attr.AttributeType.IsFSharp)
-
+        
         // 3. Purge all C# references from types
         for i, typ in this.ModuleDefinition.Types.GetMutableEnumerator() do
             if this.PurgeType(typ) then
@@ -179,13 +179,16 @@ type ModuleWeaver() as this =
     
     member __.PurgeMethodBody(method: MethodDefinition) =
         // Set up local variables
-        let body = method.Body
-        let instrs = body.Instructions
+        let returnsVoid = method.ReturnType.IsVoid
+        let body        = method.Body
+        let instrs      = body.Instructions
 
         let inline instrsAtWithLen(start, len) =
             [| for i = 0 to len do yield instrs.[start + i] |]
         let inline lazyInstrsAtWithLen(start, len) =
             lazy instrsAtWithLen(start, len)
+        let inline instrsAtUpto(start, upto) =
+            [| for i = start to upto do yield instrs.[i] |]
 
         // Recursively process calls
         let mutable i = 0
@@ -194,15 +197,30 @@ type ModuleWeaver() as this =
         // (valueStart, valueLength).
         let stack = Stack()
 
+        let inline fixLastStackEntry(prevLen) =
+            let start, len = stack.Pop()
+
+            stack.Push(start, len + instrs.Count - prevLen)
+
         while i < instrs.Count do
             let instr = instrs.[i]
             
             let mutable groupStart = 0
-            let mutable args = [||]
+            let mutable args = Array.empty
 
-            match instr.StackChanges with
+            #if DEBUG
+            let a, b = instr.GetStackChanges(returnsVoid)
+            
+            logDebug "(-%d : +%d) %O" a b instr
+            #endif
+            
+            match instr.GetStackChanges(returnsVoid) with
             | 0, 0 -> ()
             | 0, 1 -> stack.Push(i, 1)
+            | 1, 0 -> let start, len = stack.Pop()
+                      
+                      groupStart <- start
+                      args <- [| lazyInstrsAtWithLen(start, len) |]
             
             | 1, 1 -> let start, len = stack.Pop()
                       stack.Push(start, len + 1)
@@ -216,22 +234,22 @@ type ModuleWeaver() as this =
 
                       groupStart <- start
                       args <- [| lazyInstrsAtWithLen(start, len) ; lazyInstrsAtWithLen(i, 1) |]
-
-            | n, 1 -> let mutable start, len = stack.Pop()
-
+            
+            | n, (1 | 0 as p) ->
+                      let mutable start, len = stack.Pop()
                       groupStart <- start
 
                       args <- Array.zeroCreate n
                       args.[0] <- lazyInstrsAtWithLen(start, len)
 
-                      for i in 1..n do
+                      for i = 1 to n - 2 do
                         let s, l = stack.Pop()
-
                         args.[i] <- lazyInstrsAtWithLen(s, l)
                         start    <- min start s
                         len      <- len + l
                       
-                      stack.Push(start, len)
+                      if p <> 0 then
+                        stack.Push(start, len)
 
             | n, p -> logWarning "Unsupported stack operation (removed %d and added %d) in %O." n p method
 
@@ -257,31 +275,35 @@ type ModuleWeaver() as this =
 
             | :? FieldReference as fld when fld.DeclaringType.IsFSharp ->
                 // FSharpType.fieldAccess
-                let start, len, arg =
-                    match instr.OpCode.Code with
-                    | Code.Ldfld  -> groupStart, i - groupStart, Some(args.[0])
-                    | Code.Ldsfld -> i, 0, None
+                match instr.OpCode.Code with
+                | Code.Ldflda -> ()
 
-                    | _ ->
-                        logWarning "Unhandled field reference in %s (opcode: %O)." method.FullName instr.OpCode
-                        0, 0, None
+                | Code.Ldfld | Code.Ldsfld | Code.Stfld | Code.Stsfld ->
+                    let toReplace   = instrsAtUpto(groupStart, i)
+                    let replacement = replaceFieldAccess(fld, toReplace, this)
+                    let prevLen     = instrs.Count
 
-                let toReplace   = instrsAtWithLen(start, len)
-                let replacement = replaceFieldAccess(fld, toReplace, arg, this.LogDebug, this.LogWarning, this.LogError)
-                let prevLen     = instrs.Count
+                    instrs.ReplaceRange(groupStart, i, replacement)
+                    
+                    i <- i + 1 + instrs.Count - prevLen
+
+                    fixLastStackEntry(prevLen)
                 
-                instrs.ReplaceRange(start, start + len, replacement)
+                | _ ->
+                    logWarning "Unhandled field reference in %s (opcode: %O)." method.FullName instr.OpCode
                 
-                i <- i + 1 + instrs.Count - prevLen
             
             | :? MethodReference as method when method.DeclaringType.IsFSharp ->
                 // Call(a, b)
-                let toReplace   = instrsAtWithLen(groupStart, i - groupStart)
-                let replacement = replaceCall(method, toReplace, args, this.LogDebug, this.LogWarning, this.LogError)
+                let toReplace   = instrsAtUpto(groupStart, i)
+                let replacement = replaceCall(method, toReplace, args, this)
                 let prevLen     = instrs.Count
 
                 instrs.ReplaceRange(groupStart, i, replacement)
 
                 i <- i + 1 + instrs.Count - prevLen
+
+                if not method.ReturnType.IsVoid then
+                    fixLastStackEntry(prevLen)
 
             | _ -> i <- i + 1

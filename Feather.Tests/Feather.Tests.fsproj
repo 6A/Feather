@@ -7,8 +7,7 @@
 
   <ItemGroup>
     <Compile Include="Helpers.fs" />
-    <Compile Include="TestIntegrity.fs" />
-    <Compile Include="TestCompilation.fs" />
+    <Compile Include="Tests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
