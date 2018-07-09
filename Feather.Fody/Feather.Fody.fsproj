@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
@@ -29,9 +29,9 @@
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition=" '$(DebuggingWeaver)' != 'True' ">
     <!-- Play nice with Fody -->
-    <Exec Command="cp &quot;$(TargetPath)&quot; &quot;$(ProjectDir)\..\Weavers\bin\Weavers.dll&quot;" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ProjectDir)\..\Weavers\bin\Weavers.dll" />
   </Target>
 
   <ItemGroup>
@@ -39,6 +39,15 @@
     <Compile Include="TypeReplacing.fs" />
     <Compile Include="BodyWeaving.fs" />
     <Compile Include="ModuleWeaver.fs" />
+  </ItemGroup>
+
+  <PropertyGroup Condition=" '$(DebuggingWeaver)' == 'True' ">
+    <TargetFramework>netcoreapp2.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  
+  <ItemGroup Condition=" '$(DebuggingWeaver)' == 'True' ">
+    <Compile Include="Program.fs" />
   </ItemGroup>
 
   <ItemGroup>

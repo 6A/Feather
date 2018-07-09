@@ -18,8 +18,11 @@ let replaceCall(target: MethodReference, instrs: Instruction[], args: Lazy<Instr
     match (sprintf "%O::%s" target.DeclaringType target.Name) with
     | "Microsoft.FSharp.Collections.SeqModule::Length" ->
         match w.ModuleDefinition.MethodOf(Enumerable.Count Seq.empty) with
-        | null   -> logWarning "Unable to resolve System.Linq.Enumerable."
-        | method -> instrs.[instrs.Length - 1].Operand <- method
+        | :? GenericInstanceMethod as method ->
+            method.GenericArguments.[0] <- (target :?> GenericInstanceMethod).GenericArguments.[0]
+            instrs.[instrs.Length - 1].Operand <- method
+
+        | _ -> logWarning "Unable to resolve System.Linq.Enumerable."
     
     | unknown ->
         logWarning "Unable to replace call to %s." unknown

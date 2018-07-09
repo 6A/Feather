@@ -12,7 +12,7 @@ let private assemblyPath =
     let sub = if inDebugMode then "Debug" else "Release"
 
     Path.Combine(__SOURCE_DIRECTORY__, "..", "Feather.TestAssembly", "bin",
-                   sub, "netstandard2.0", "Feather.TestAssembly.dll")
+                 sub, "netcoreapp2.0", "Feather.TestAssembly.dll")
 
 let private assembly = AssemblyDefinition.ReadAssembly(assemblyPath)
 let private modl = assembly.MainModule
